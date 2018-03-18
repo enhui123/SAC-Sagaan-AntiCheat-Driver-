@@ -19,19 +19,29 @@ UNICODE_STRING SACDriverName, SACSymbolName;
 PVOID ObHandle = NULL;
 
 //ULONG ProtectedProcess1 = 516; // The Usermode Anti Cheat PID
-ULONG ProtectedProcess = 5752; // Your game's PID
+ULONG ProtectedProcess = 0; // Your game's PID
+ULONG Lsass = 0;
+ULONG Csrss1 = 0;
+ULONG Csrss2 = 0;
 // This function will be called when a handle is about to be created
 OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
 {
 	UNREFERENCED_PARAMETER(RegistrationContext);
 
-	ULONG Lsass = 728;
+	if (ProtectedProcess == 0)
+		return OB_PREOP_SUCCESS;
+
+	if (Lsass == 0)
+		return OB_PREOP_SUCCESS;
+
+	if (Csrss1 == 0)
+		return OB_PREOP_SUCCESS;
+
+	if (Csrss2 == 0)
+		return OB_PREOP_SUCCESS;
+
 	PEPROCESS LsassProcess;
-
-	ULONG Csrss1 = 396;
 	PEPROCESS Csrss1Process;
-
-	ULONG Csrss2 = 500;
 	PEPROCESS Csrss2Process;
 
 	PEPROCESS OpenedProcess = (PEPROCESS)OperationInformation->Object,
@@ -90,9 +100,30 @@ VOID UnRegister()
 	ObHandle = NULL;
 }
 
+// Terminating a process of your choice using the PID, usefull if the cheat is also using a driver to strip it's handles and therefore you can forcefully close it using the driver
+NTSTATUS TerminatingProcess(PVOID targetPid)
+{
+	NTSTATUS NtRet = STATUS_SUCCESS;
+	PEPROCESS PeProc = { 0 };
+	NtRet = PsLookupProcessByProcessId(targetPid, &PeProc);
+	if (NtRet != STATUS_SUCCESS)
+	{
+		return NtRet;
+	}
+	HANDLE ProcessHandle;
+	NtRet = ObOpenObjectByPointer(PeProc, NULL, NULL, 25, *PsProcessType, KernelMode, &ProcessHandle);
+	if (NtRet != STATUS_SUCCESS)
+	{
+		return NtRet;
+	}
+	ZwTerminateProcess(ProcessHandle, 0);
+	//ZwClose(ProcessHandle);
+	return NtRet;
+}
+
 NTSTATUS DriverDispatchRoutine(PDEVICE_OBJECT pDeviceObject, PIRP pIrp)
 {
-
+	PVOID buffer;
 	NTSTATUS NtStatus = STATUS_SUCCESS;
 	PIO_STACK_LOCATION pIo;
 	pIo = IoGetCurrentIrpStackLocation(pIrp);
@@ -106,6 +137,15 @@ NTSTATUS DriverDispatchRoutine(PDEVICE_OBJECT pDeviceObject, PIRP pIrp)
 		NtStatus = STATUS_SUCCESS;
 		break;
 	case IRP_MJ_WRITE:
+		buffer = MmGetSystemAddressForMdlSafe(pIrp->MdlAddress, NormalPagePriority);
+
+		if (!buffer)
+		{
+			NtStatus = STATUS_INSUFFICIENT_RESOURCES;
+			break;
+		}
+		TerminatingProcess((int)buffer);
+		TerminatingProcess(buffer);
 		break;
 	case IRP_MJ_CLOSE:
 		NtStatus = STATUS_SUCCESS;
@@ -265,25 +305,6 @@ PCHAR GhostProcess(UINT32 pid)
 	return (PCHAR)result;
 }
 
-// Terminating a process of your choice using the PID, usefull if the cheat is also using a driver to strip it's handles and therefore you can forcefully close it using the driver
-NTSTATUS TerminatingProcess(PVOID targetPid)
-{
-	NTSTATUS NtRet = STATUS_SUCCESS;
-	PEPROCESS PeProc = { 0 };
-	NtRet = PsLookupProcessByProcessId(targetPid, &PeProc);
-	if (NtRet != STATUS_SUCCESS)
-	{
-		return NtRet;
-	}
-	HANDLE ProcessHandle;
-	NtRet = ObOpenObjectByPointer(PeProc, NULL, NULL, 25, *PsProcessType, KernelMode, &ProcessHandle);
-	if (NtRet != STATUS_SUCCESS)
-	{
-		return NtRet;
-	}
-	ZwTerminateProcess(ProcessHandle, 0);
-	return NtRet;
-}
 
 // Enabling the callback,
 VOID EnableCallBack()
@@ -320,6 +341,80 @@ VOID EnableCallBack()
 
 PDEVICE_OBJECT g_MyDevice; // Global pointer to our device object
 
+
+NTSTATUS Create(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = 0;
+
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+	return STATUS_SUCCESS;
+}
+NTSTATUS Close(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	Irp->IoStatus.Status = STATUS_SUCCESS;
+	Irp->IoStatus.Information = 0;
+
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+	return STATUS_SUCCESS;
+}
+
+// Request to read from usermode
+#define IO_READ_REQUEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0701 /* Our Custom Code */, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+
+
+// datatype for read request
+typedef struct _KERNEL_READ_REQUEST
+{
+	ULONG CSGO;
+
+	ULONG LSASS;
+	ULONG CSRSS;
+	ULONG CSRSS2;
+
+} KERNEL_READ_REQUEST, *PKERNEL_READ_REQUEST;
+
+
+NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+	NTSTATUS Status;
+	ULONG BytesIO = 0;
+
+	PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+
+	// Code received from user space
+	ULONG ControlCode = stack->Parameters.DeviceIoControl.IoControlCode;
+
+	if (ControlCode == IO_READ_REQUEST)
+	{
+		// Get the input buffer & format it to our struct
+		PKERNEL_READ_REQUEST ReadInput = (PKERNEL_READ_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+
+		
+		ProtectedProcess = ReadInput->CSGO;
+		Lsass = ReadInput->LSASS;
+		Csrss1 = ReadInput->CSRSS;
+		Csrss2 = ReadInput->CSRSS2;
+		
+
+		Status = STATUS_SUCCESS;
+		BytesIO = sizeof(KERNEL_READ_REQUEST);
+	}
+	else
+	{
+		// if the code is unknown
+		Status = STATUS_INVALID_PARAMETER;
+		BytesIO = 0;
+	}
+
+	// Complete the request
+	Irp->IoStatus.Status = Status;
+	Irp->IoStatus.Information = BytesIO;
+	IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+	return Status;
+}
+
 // Driver's Main function. This will be called and looped through till returned, or unloaded.
 NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pUniStr)
 {
@@ -337,7 +432,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pUniStr)
 		{
 			pDriverObject->MajorFunction[i] = DriverDispatchRoutine;
 		}
+
+
 		IoCreateSymbolicLink(&SACSymbolName, &SACDriverName);
+
+		pDriverObject->MajorFunction[IRP_MJ_CREATE] = Create;
+		pDriverObject->MajorFunction[IRP_MJ_CLOSE] = Close;
+		pDriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = IoControl;
+
 		pDeviceObj->Flags |= DO_DIRECT_IO;
 		pDeviceObj->Flags &= (~DO_DEVICE_INITIALIZING);
 	}
