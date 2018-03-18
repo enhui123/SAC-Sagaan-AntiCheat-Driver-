@@ -20,6 +20,7 @@ PVOID ObHandle = NULL;
 
 //ULONG ProtectedProcess1 = 516; // The Usermode Anti Cheat PID
 ULONG ProtectedProcess = 0; // Your game's PID
+ULONG UsermodeAntiCheat = 0; // Your game's PID
 ULONG Lsass = 0;
 ULONG Csrss1 = 0;
 ULONG Csrss2 = 0;
@@ -27,6 +28,9 @@ ULONG Csrss2 = 0;
 OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATION_INFORMATION OperationInformation)
 {
 	UNREFERENCED_PARAMETER(RegistrationContext);
+
+	if (UsermodeAntiCheat == 0)
+		return OB_PREOP_SUCCESS;
 
 	if (ProtectedProcess == 0)
 		return OB_PREOP_SUCCESS;
@@ -70,7 +74,8 @@ OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATIO
 		return OB_PREOP_SUCCESS;
 
 
-	if (PsGetProcessId((PEPROCESS)OperationInformation->Object) == ProtectedProcess) // PsGetProcessId((PEPROCESS)OperationInformation->Object) equals to the created handle's PID, so if the created Handle equals to the protected process's PID, strip
+	// PsGetProcessId((PEPROCESS)OperationInformation->Object) equals to the created handle's PID, so if the created Handle equals to the protected process's PID, strip
+	if (PsGetProcessId((PEPROCESS)OperationInformation->Object) == ProtectedProcess || PsGetProcessId((PEPROCESS)OperationInformation->Object) == UsermodeAntiCheat)
 	{
 
 		if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) // striping handle 
@@ -101,7 +106,7 @@ VOID UnRegister()
 }
 
 // Terminating a process of your choice using the PID, usefull if the cheat is also using a driver to strip it's handles and therefore you can forcefully close it using the driver
-NTSTATUS TerminatingProcess(PVOID targetPid)
+NTSTATUS TerminatingProcess(ULONG targetPid)
 {
 	NTSTATUS NtRet = STATUS_SUCCESS;
 	PEPROCESS PeProc = { 0 };
@@ -137,15 +142,6 @@ NTSTATUS DriverDispatchRoutine(PDEVICE_OBJECT pDeviceObject, PIRP pIrp)
 		NtStatus = STATUS_SUCCESS;
 		break;
 	case IRP_MJ_WRITE:
-		buffer = MmGetSystemAddressForMdlSafe(pIrp->MdlAddress, NormalPagePriority);
-
-		if (!buffer)
-		{
-			NtStatus = STATUS_INSUFFICIENT_RESOURCES;
-			break;
-		}
-		TerminatingProcess((int)buffer);
-		TerminatingProcess(buffer);
 		break;
 	case IRP_MJ_CLOSE:
 		NtStatus = STATUS_SUCCESS;
@@ -305,40 +301,6 @@ PCHAR GhostProcess(UINT32 pid)
 	return (PCHAR)result;
 }
 
-
-// Enabling the callback,
-VOID EnableCallBack()
-{
-	NTSTATUS NtRet1 = STATUS_SUCCESS;
-	OB_OPERATION_REGISTRATION OBOperationRegistration;
-	OB_CALLBACK_REGISTRATION OBOCallbackRegistration;
-	REG_CONTEXT regContext;
-	UNICODE_STRING usAltitude;
-	memset(&OBOperationRegistration, 0, sizeof(OB_OPERATION_REGISTRATION));
-	memset(&OBOCallbackRegistration, 0, sizeof(OB_CALLBACK_REGISTRATION));
-	memset(&regContext, 0, sizeof(REG_CONTEXT));
-	regContext.ulIndex = 1;
-	regContext.Version = 120;
-	RtlInitUnicodeString(&usAltitude, L"1000");
-
-	if ((USHORT)ObGetFilterVersion() == OB_FLT_REGISTRATION_VERSION)
-	{
-		OBOperationRegistration.ObjectType = PsProcessType; // Use To Strip Handle Permissions For Threads PsThreadType
-		OBOperationRegistration.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
-		OBOperationRegistration.PostOperation = PostCallBack; // Giving the function which happens after creating
-		OBOperationRegistration.PreOperation = PreCallback; // Giving the function which happens before creating
-
-															// Setting the altitude of the driver
-		OBOCallbackRegistration.Altitude = usAltitude;
-		OBOCallbackRegistration.OperationRegistration = &OBOperationRegistration;
-		OBOCallbackRegistration.RegistrationContext = &regContext;
-		OBOCallbackRegistration.Version = OB_FLT_REGISTRATION_VERSION;
-		OBOCallbackRegistration.OperationRegistrationCount = (USHORT)1;
-
-		NtRet1 = ObRegisterCallbacks(&OBOCallbackRegistration, &ObHandle); // Register The CallBack
-	}
-}
-
 PDEVICE_OBJECT g_MyDevice; // Global pointer to our device object
 
 
@@ -371,10 +333,12 @@ typedef struct _KERNEL_READ_REQUEST
 	ULONG LSASS;
 	ULONG CSRSS;
 	ULONG CSRSS2;
+	ULONG UsermodeProgram;
+	ULONG TerminatePrograms;
 
 } KERNEL_READ_REQUEST, *PKERNEL_READ_REQUEST;
 
-
+ULONG TerminateProcess = 0;
 NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
 	NTSTATUS Status;
@@ -390,12 +354,35 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 		// Get the input buffer & format it to our struct
 		PKERNEL_READ_REQUEST ReadInput = (PKERNEL_READ_REQUEST)Irp->AssociatedIrp.SystemBuffer;
 
-		
-		ProtectedProcess = ReadInput->CSGO;
-		Lsass = ReadInput->LSASS;
-		Csrss1 = ReadInput->CSRSS;
-		Csrss2 = ReadInput->CSRSS2;
-		
+		if (ReadInput->UsermodeProgram != 0)
+		{
+			UsermodeAntiCheat = ReadInput->UsermodeProgram;
+		}
+
+		if (ReadInput->CSGO != 0)
+		{
+			ProtectedProcess = ReadInput->CSGO;
+		}
+
+		if (ReadInput->LSASS != 0)
+		{
+			Lsass = ReadInput->LSASS;
+		}
+
+		if (ReadInput->CSRSS != 0)
+		{
+			Csrss1 = ReadInput->CSRSS;
+		}
+
+		if (ReadInput->CSRSS2 != 0)
+		{
+			Csrss2 = ReadInput->CSRSS2;
+		}
+
+		if (ReadInput->TerminatePrograms != 0)
+		{
+			TerminateProcess = ReadInput->TerminatePrograms;
+		}
 
 		Status = STATUS_SUCCESS;
 		BytesIO = sizeof(KERNEL_READ_REQUEST);
@@ -413,6 +400,45 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
 	return Status;
+}
+
+// Enabling the callback,
+VOID EnableCallBack()
+{
+	NTSTATUS NtRet1 = STATUS_SUCCESS;
+	OB_OPERATION_REGISTRATION OBOperationRegistration;
+	OB_CALLBACK_REGISTRATION OBOCallbackRegistration;
+	REG_CONTEXT regContext;
+	UNICODE_STRING usAltitude;
+	memset(&OBOperationRegistration, 0, sizeof(OB_OPERATION_REGISTRATION));
+	memset(&OBOCallbackRegistration, 0, sizeof(OB_CALLBACK_REGISTRATION));
+	memset(&regContext, 0, sizeof(REG_CONTEXT));
+	regContext.ulIndex = 1;
+	regContext.Version = 120;
+	RtlInitUnicodeString(&usAltitude, L"1000");
+
+	if ((USHORT)ObGetFilterVersion() == OB_FLT_REGISTRATION_VERSION)
+	{
+		OBOperationRegistration.ObjectType = PsProcessType; // Use To Strip Handle Permissions For Threads PsThreadType
+		OBOperationRegistration.Operations = OB_OPERATION_HANDLE_CREATE | OB_OPERATION_HANDLE_DUPLICATE;
+		OBOperationRegistration.PostOperation = PostCallBack; // Giving the function which happens after creating
+		OBOperationRegistration.PreOperation = PreCallback; // Giving the function which happens before creating
+
+															// Setting the altitude of the driver
+		OBOCallbackRegistration.Altitude = usAltitude;
+		OBOCallbackRegistration.OperationRegistration = &OBOperationRegistration;
+		OBOCallbackRegistration.RegistrationContext = &regContext;
+		OBOCallbackRegistration.Version = OB_FLT_REGISTRATION_VERSION;
+		OBOCallbackRegistration.OperationRegistrationCount = (USHORT)1;
+
+		NtRet1 = ObRegisterCallbacks(&OBOCallbackRegistration, &ObHandle); // Register The CallBack
+	}
+
+	if (TerminateProcess != 0)
+	{
+		TerminatingProcess(TerminateProcess);
+		TerminateProcess = 0;
+	}
 }
 
 // Driver's Main function. This will be called and looped through till returned, or unloaded.
