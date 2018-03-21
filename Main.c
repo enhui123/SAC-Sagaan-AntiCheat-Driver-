@@ -47,12 +47,14 @@ OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATIO
 	PEPROCESS LsassProcess;
 	PEPROCESS Csrss1Process;
 	PEPROCESS Csrss2Process;
+	PEPROCESS ProtectedProcessProcess;
 
 	PEPROCESS OpenedProcess = (PEPROCESS)OperationInformation->Object,
 		CurrentProcess = PsGetCurrentProcess();
 
 	ULONG ulProcessId = PsGetProcessId(OpenedProcess);
 
+	PsLookupProcessByProcessId(ProtectedProcess, &ProtectedProcessProcess); // Getting the PEPROCESS using the PID 
 	PsLookupProcessByProcessId(Lsass, &LsassProcess); // Getting the PEPROCESS using the PID 
 	PsLookupProcessByProcessId(Csrss1, &Csrss1Process); // Getting the PEPROCESS using the PID 
 	PsLookupProcessByProcessId(Csrss2, &Csrss2Process); // Getting the PEPROCESS using the PID 
@@ -67,6 +69,12 @@ OB_PREOP_CALLBACK_STATUS PreCallback(PVOID RegistrationContext, POB_PRE_OPERATIO
 		return OB_PREOP_SUCCESS;
 
 	if (OpenedProcess == CurrentProcess)
+		return OB_PREOP_SUCCESS;
+
+	if (OpenedProcess == ProtectedProcess)
+		return OB_PREOP_SUCCESS;
+
+	if (OpenedProcess == UsermodeAntiCheat)
 		return OB_PREOP_SUCCESS;
 
 	// Allow operations from within the kernel
@@ -158,10 +166,9 @@ NTSTATUS DriverDispatchRoutine(PDEVICE_OBJECT pDeviceObject, PIRP pIrp)
 // This will be called, if the driver is unloaded or just returns something
 VOID DriverUnload(PDRIVER_OBJECT pDriverObject)
 {
-	if (ObHandle != NULL)
-	{
-		UnRegister();
-	}
+
+	UnRegister();
+
 	IoDeleteSymbolicLink(&SACSymbolName);
 	IoDeleteDevice(pDriverObject->DeviceObject);
 
@@ -324,6 +331,9 @@ NTSTATUS Close(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 // Request to read from usermode
 #define IO_READ_REQUEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0701 /* Our Custom Code */, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
 
+// Request to write virtual user memory (memory of a program) from kernel space
+#define IO_UNLOADDRIVER_REQUEST CTL_CODE(FILE_DEVICE_UNKNOWN, 0x0702 /* Our Custom Code */, METHOD_BUFFERED, FILE_SPECIAL_ACCESS)
+
 
 // datatype for read request
 typedef struct _KERNEL_READ_REQUEST
@@ -338,7 +348,15 @@ typedef struct _KERNEL_READ_REQUEST
 
 } KERNEL_READ_REQUEST, *PKERNEL_READ_REQUEST;
 
+// database for unload details
+typedef struct _KERNEL_UNLOADDRIVER
+{
+	ULONG UnloadDriver;
+
+} KERNEL_UNLOADDRIVER, *PKERNEL_UNLOADDRIVER;
+
 ULONG TerminateProcess = 0;
+BOOLEAN  UnloadDriver = FALSE;
 NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
 	NTSTATUS Status;
@@ -348,7 +366,15 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 	// Code received from user space
 	ULONG ControlCode = stack->Parameters.DeviceIoControl.IoControlCode;
+	if (ControlCode == IO_UNLOADDRIVER_REQUEST)
+	{
+		PKERNEL_UNLOADDRIVER ReadInput = (PKERNEL_UNLOADDRIVER)Irp->AssociatedIrp.SystemBuffer;
 
+		if (ReadInput->UnloadDriver)
+		{
+			UnloadDriver = TRUE;
+		}
+	}
 	if (ControlCode == IO_READ_REQUEST)
 	{
 		// Get the input buffer & format it to our struct
@@ -474,7 +500,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT pDriverObject, PUNICODE_STRING pUniStr)
 	pDriverObject->DriverUnload = DriverUnload; // Telling the driver, this is the unload function
 	EnableCallBack();
 
-
+	if (UnloadDriver)
+	{
+		return NtRet;
+	}
 
 	//return NtRet;
 }
